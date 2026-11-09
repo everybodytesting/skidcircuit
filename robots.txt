@@ -2,3 +2,4 @@ User-agent: *
 Allow: /
 
 Sitemap: https://everybodysim.github.io/Racing-game/sitemap.xml
+

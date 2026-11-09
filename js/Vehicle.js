@@ -11,11 +11,6 @@ const _quat = new THREE.Quaternion();
 const _up = new THREE.Vector3( 0, 1, 0 );
 
 const SPEED_SCALE = 12.5;
-
-// Track grip assist (test build, 2026-11-09): sideways velocity is bled off
-// at this rate (1/s) while the car is grounded and steering gently. Sharp
-// steering or an existing slide fades it to zero so drifting is unchanged.
-const TRACK_GRIP_RATE = 9.0;
 const LINEAR_DAMP = 0.1;
 
 function lerpAngle( a, b, t ) {
@@ -65,8 +60,8 @@ export class Vehicle {
 		this.inputZ = 0;
 
 		this.driftIntensity = 0;
-		// Set each frame by the host's ground raycasts; true until told otherwise.
-		this.groundContact = true;
+		// Progressive steering accumulator (0 = straight, ±1 = full lock).
+		this.steerRamp = 0;
 		this.spawnPosition = new THREE.Vector3( 3.5, 0.5, 5 );
 		this.spawnAngle = 0;
 		this.topSpeed = 1.0;
@@ -242,14 +237,28 @@ export class Vehicle {
 		this.inputX = controlsInput.x;
 		this.inputZ = controlsInput.z;
 
+		// Progressive steering (user order 2026-11-09): steering builds on a
+		// curve instead of snapping to full lock. A short tap gives a light
+		// nudge, HOLDING ramps up to strong steering (~0.6s to full lock),
+		// and releasing winds back down fast. The 1.35 power curve keeps the
+		// first moments of a turn gentle, so normal driving stays smooth.
+		const STEER_CHARGE_RATE = 1.7;   // per second toward the held input
+		const STEER_RELEASE_RATE = 7.0;  // per second back to neutral
+		this.steerRamp = Number.isFinite( this.steerRamp ) ? this.steerRamp : 0;
+		const steerTarget = Math.abs( this.inputX ) > 0.05 ? this.inputX : 0;
+		const steerStep = ( steerTarget === 0 ? STEER_RELEASE_RATE : STEER_CHARGE_RATE ) * dt;
+		const steerDelta = steerTarget - this.steerRamp;
+		this.steerRamp += Math.abs( steerDelta ) <= steerStep ? steerDelta : Math.sign( steerDelta ) * steerStep;
+		this.steerRamp = THREE.MathUtils.clamp( this.steerRamp, - 1, 1 );
+		const shapedSteer = Math.sign( this.steerRamp ) * Math.pow( Math.abs( this.steerRamp ), 1.35 );
+
 		let direction = Math.sign( this.linearSpeed );
 		if ( direction === 0 ) direction = Math.abs( this.inputZ ) > 0.1 ? Math.sign( this.inputZ ) : 1;
 
 		const steeringGrip = THREE.MathUtils.clamp( Math.abs( this.linearSpeed ), 0.2, 1.0 ) * this.gripMultiplier;
 
-		const targetAngular = - this.inputX * steeringGrip * 4 * direction;
-		// Snappier, more controlled turn-in (test build, 2026-11-09).
-		this.angularSpeed = THREE.MathUtils.lerp( this.angularSpeed, targetAngular, dt * 5 );
+		const targetAngular = - shapedSteer * steeringGrip * 4 * direction;
+		this.angularSpeed = THREE.MathUtils.lerp( this.angularSpeed, targetAngular, dt * 4 );
 
 		this.container.rotateY( this.angularSpeed * dt );
 
@@ -302,60 +311,19 @@ export class Vehicle {
 			_right.normalize();
 
 			const angvel = this.rigidBody.motionProperties.angularVelocity;
+			const drive = this.linearSpeed * this.driveForce * this.driveMultiplier * dt;
+
+			rigidBody.setAngularVelocity( this.physicsWorld, this.rigidBody, [
+				angvel[ 0 ] + _right.x * drive,
+				angvel[ 1 ],
+				angvel[ 2 ] + _right.z * drive
+			] );
 
 			const pos = this.rigidBody.position;
 			this.spherePos.set( pos[ 0 ], pos[ 1 ], pos[ 2 ] );
 
 			const vel = this.rigidBody.motionProperties.linearVelocity;
 			this.sphereVel.set( vel[ 0 ], vel[ 1 ], vel[ 2 ] );
-
-			// ── Track grip assist (test build, 2026-11-09) ─────────────────
-			// Normal driving feels glued to the track: sideways velocity is
-			// actively bled off while grounded and steering gently. Sharp
-			// steering (or a slide already under way) fades the assist to
-			// ZERO, so hard cornering keeps the existing drift exactly.
-			const lateralVelSigned = this.sphereVel.x * _right.x + this.sphereVel.z * _right.z;
-			const forwardVelSigned = this.sphereVel.x * _forward.x + this.sphereVel.z * _forward.z;
-			const slipRatio = Math.abs( lateralVelSigned ) / Math.max( Math.abs( forwardVelSigned ), 0.6 );
-			const steerAbs = Math.abs( this.inputX );
-			// Full grip up to 30% of the steering lock, none past ~85%.
-			const steerFade = THREE.MathUtils.clamp( 1 - Math.max( 0, steerAbs - 0.3 ) / 0.55, 0, 1 );
-			// Full grip below 22% lateral slip, none past ~62% (real drift).
-			const slipFade = THREE.MathUtils.clamp( 1 - Math.max( 0, slipRatio - 0.22 ) / 0.4, 0, 1 );
-			// Never fight slow-speed manoeuvring or a stationary car.
-			const speedFade = THREE.MathUtils.clamp( ( Math.abs( forwardVelSigned ) - 0.5 ) / 2.0, 0, 1 );
-			// Airborne (jumps, ramps): grip assist stays out of the way.
-			const groundFade = this.groundContact === false ? 0 : 1;
-			const gripRate = TRACK_GRIP_RATE * steerFade * slipFade * speedFade * groundFade;
-
-			let keepLateral = 1;
-			if ( gripRate > 1e-4 && Math.abs( lateralVelSigned ) > 1e-4 ) {
-
-				keepLateral = Math.exp( - gripRate * dt );
-				const lateralDelta = lateralVelSigned * ( 1 - keepLateral );
-				rigidBody.setLinearVelocity( this.physicsWorld, this.rigidBody, [
-					this.sphereVel.x - _right.x * lateralDelta,
-					this.sphereVel.y,
-					this.sphereVel.z - _right.z * lateralDelta,
-				] );
-				this.sphereVel.x -= _right.x * lateralDelta;
-				this.sphereVel.z -= _right.z * lateralDelta;
-
-			}
-
-			// The rolling spin that produces the sideways slide lives on the
-			// forward axis. Damp the SAME fraction so velocity and spin stay
-			// coupled — damping one alone makes the sphere skid then stutter.
-			const lateralSpin = angvel[ 0 ] * _forward.x + angvel[ 2 ] * _forward.z;
-			const spinDelta = lateralSpin * ( 1 - keepLateral );
-
-			const drive = this.linearSpeed * this.driveForce * this.driveMultiplier * dt;
-
-			rigidBody.setAngularVelocity( this.physicsWorld, this.rigidBody, [
-				angvel[ 0 ] + _right.x * drive - _forward.x * spinDelta,
-				angvel[ 1 ],
-				angvel[ 2 ] + _right.z * drive - _forward.z * spinDelta
-			] );
 
 		}
 

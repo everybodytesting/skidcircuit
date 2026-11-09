@@ -1,7 +1,7 @@
 /**
  * ui-theme.css — Shared dark theme + nav bar styles for Skid Circuit sub-pages.
  * Loaded in <head> of every sub-page. Uses skid- prefixed classes to avoid
- * conflicts with each page's existing inline styles.
+ * conflicts with each page's existing inline styles. 
  */
 
 :root {

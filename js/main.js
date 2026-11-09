@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { createWorldSettings, createWorld, addBroadphaseLayer, addObjectLayer, enableCollision, registerAll, updateWorld, rigidBody, box, sphere, triangleMesh, MotionType, MotionQuality, castRay, createClosestCastRayCollector, createAnyCastRayCollector, createDefaultCastRaySettings, CastRayStatus, filter as ccLayerFilter } from 'crashcat';
-import { Vehicle } from './Vehicle.js?v=1000234';
+import { Vehicle } from './Vehicle.js?v=1000235';
 import { createShadowProxyController } from './ShadowProxy.js?v=4';
 import { Camera } from './Camera.js?v=17';
 import { Controls } from './Controls.js';
@@ -10955,6 +10955,10 @@ function completeCampaignStage() {
 			left: left && right && left.bodyId === right.bodyId ? left.depth : null,
 			right: left && right && left.bodyId === right.bodyId ? right.depth : null,
 		};
+		// Ground contact for the grip assist: any of the four downward rays
+		// finding a surface means the car is on the track (all null = airborne),
+		// so jumps and ramps are never damped (test build, 2026-11-09).
+		targetVehicle.groundContact = Boolean( forward || backward || left || right );
 		const tilt = Vehicle.computeSlopeTiltFromSamples( samples, L, W );
 		targetVehicle.setSlopeVisualTilt( tilt.pitch, tilt.roll );
 		// Physical slope signal for the seam-bounce guard (isVehicleOnSlopeCell):
